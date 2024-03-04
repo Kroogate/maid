@@ -1,0 +1,10 @@
+[package]
+name = "kroogate/maid"
+version = "0.2.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+exclude = ["**"]
+include = ["src", "default.project.json", "wally.lock", "wally.toml"]
+
+[dependencies]
+promise = "lukadev-0/typed-promise@4.0.2"
