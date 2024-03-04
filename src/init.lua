@@ -39,7 +39,7 @@ type maid_impl = {
 	clear: (self: maid) -> (),
 	clean: (self: maid) -> (),
 }
-export type object_enum =
+type object_enum =
 	Instance
 	| () -> () | { [string]: (object_enum) -> () } | thread | promise | RBXScriptConnection
 export type maid = typeof(setmetatable(
@@ -47,7 +47,7 @@ export type maid = typeof(setmetatable(
 	{} :: maid_impl
 ))
 
-local function is_promise(object: object_enum): boolean
+local function is_promise(object: object_enum): boolean -- taken from sleitnick/trove
 	local n_promise: promise = object :: promise
 	return typeof(object) == "table"
 		and typeof(n_promise.getStatus) == "function"
@@ -104,9 +104,7 @@ function maid:add(object: object_enum, custom_method: string?): object_enum
 	self.object_cleanups[object] = method
 
 	if is_promise then
-		(object :: promise):finally(function(status: "Cancelled" | "Rejected" | "Resolved" | "Started"): ...any
-			self:remove_no_clean(object)
-		end)
+        (object :: promise):finallyCall(self.remove_no_clean, self, object) -- remove promises from maid when they are cleaned so they dont take up space
 	end
 
 	return object
