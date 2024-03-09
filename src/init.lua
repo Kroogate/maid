@@ -30,6 +30,7 @@ type promise = {
 type maid_impl = {
 	__index: maid_impl,
 	new: () -> maid,
+	spawn: (self: maid, fn: (...any) -> object_enum, ...any) -> object_enum,
 	add: (self: maid, object: object_enum, method: string?) -> object_enum,
 	extend: (self: maid) -> maid,
 	remove: (self: maid, object: object_enum) -> (),
@@ -39,9 +40,7 @@ type maid_impl = {
 	clear: (self: maid) -> (),
 	clean: (self: maid) -> (),
 }
-type object_enum =
-	Instance
-	| () -> () | { [string]: (object_enum) -> () } | thread | promise | RBXScriptConnection
+type object_enum = Instance | () -> () | { [string]: (object_enum) -> () } | thread | promise | RBXScriptConnection
 export type maid = typeof(setmetatable(
 	{} :: { objects: { object_enum }, object_cleanups: { [Instance]: string }, cleaning: boolean },
 	{} :: maid_impl
@@ -86,6 +85,12 @@ end
 local maid = {}
 maid.__index = maid
 
+--[=[
+  @function new
+  @return maid -- The new maid
+
+  Constructs a new maid
+]=]
 function maid.new(): maid
 	local new_maid = {
 		objects = {},
@@ -96,6 +101,20 @@ function maid.new(): maid
 	return setmetatable(new_maid, maid)
 end
 
+--[=[
+  @within maid
+  @param object -- The object to add to the maid
+  @return object -- The passed object	
+
+  Adds a new object to the maid, returns the object passed in for convenience
+  Example usage:
+  ```lua
+	local instance = Instance.new("Part")
+	local instance_ptr = maid:add(instance)
+	print(instance == instance_ptr) -- true
+  ```
+]=]
+
 function maid:add(object: object_enum, custom_method: string?): object_enum
 	assert(not self.cleaning, "cannot call maid:add while cleaning")
 	local method: string, is_promise: boolean = get_cleanup_method(object, custom_method)
@@ -104,11 +123,53 @@ function maid:add(object: object_enum, custom_method: string?): object_enum
 	self.object_cleanups[object] = method
 
 	if is_promise then
-        (object :: promise):finallyCall(self.remove_no_clean, self, object) -- remove promises from maid when they are cleaned so they dont take up space
+		(object :: promise):finallyCall(self.remove_no_clean, self, object) -- remove promises from maid when they are cleaned so they dont take up space
 	end
 
 	return object
 end
+
+--[=[
+  @within maid
+  @param Fn (...any)->Object -- The function for the maid to pass arguments in
+  @param ... ...any -- The arguments for the maid to pass to the function
+  @return Object -- The result of the function
+
+  Passes `...` to `Fn`, adds the result to the maid, then returns the result
+  Example usage:
+  ```lua
+	local callback = function(parent: Instance): Part
+		return Instance.new("Part", parent)
+	end
+
+	local part = maid:spawn(callback, workspace)
+	print(part.Parent) -- workspace
+  ```
+]=]
+
+function maid:spawn(fn: (...any) -> object_enum, ...): object_enum
+	local result = fn(...)
+	self:add(result)
+	return result
+end
+
+--[=[
+  @within maid
+  @return Maid -- The constructed maid
+
+  Makes a new maid and adds it to the maid that the function was called from
+  Example usage:
+  ```lua
+	local maid1 = maid.new()
+	local maid2 = maid1:extend()
+
+	maid2:add(function() 
+		print("hi")
+	end)
+
+	maid1:clean() -- hi
+  ```
+]=]
 
 function maid:extend(): maid
 	assert(not self.cleaning, "cannot call maid:extend while cleaning")
@@ -116,6 +177,12 @@ function maid:extend(): maid
 	self:add(new_maid, "clean")
 	return new_maid
 end
+
+--[=[
+  @within maid
+
+  Removes an object from the maid & cleans it
+]=]
 
 function maid:remove(object: object_enum)
 	assert(not self.cleaning, "cannot call maid:remove while cleaning")
@@ -133,6 +200,12 @@ function maid:remove(object: object_enum)
 	self.object_cleanups[object] = nil
 end
 
+--[=[
+  @within maid
+
+  Removes an object from the maid, but does not clean it
+]=]
+
 function maid:remove_no_clean(object: object_enum)
 	assert(not self.cleaning, "cannot call maid:remove_no_clean while cleaning")
 	local in_table = table.find(self.objects, object)
@@ -145,16 +218,57 @@ function maid:remove_no_clean(object: object_enum)
 	self.object_cleanups[object] = nil
 end
 
+--[=[
+  @within maid
+  @param Signal RBXScriptSignal -- The signal to connect to
+  @param Callback (...any)->() -- The callback to hook to the signal
+  @returns Connection RBXScriptConnection -- The connection hooking `callback` to `signal`
+
+  Connects `callback` to `signal`, and adds it to the maid. The same as
+   ```lua
+	local connection = maid:add(signal:Connect(callback))
+   ```
+
+   Example usage:
+   ```lua
+   local humanoid: Humanoid = some_humanoid
+   local connection = maid:connect(humanoid.Died, function()
+	print("hi")
+   end)
+   ```
+]=]
+
 function maid:connect(signal: RBXScriptSignal, callback: (...any) -> ()): RBXScriptConnection
 	return self:add(signal:Connect(callback))
 end
 
+--[=[
+  @within maid
+  @param Instance -- The instance to bind to
+` @returns Connection -- The connection listening to `instance.Destroying`
+
+  Connects to `instance.Destroying` and cleans the maid once the signal fires.
+
+  Example usage:
+   ```lua
+   local maid = maid.new()
+   maid:add(function()
+	print("hi")
+   end)
+   maid:bind_to_instance(some_instance)
+   some_instance:Destroy() -- hi
+   ```
+]=]
 function maid:bind_to_instance(instance: Instance): RBXScriptConnection
 	return self:connect(instance.Destroying, function()
 		self:clean()
 	end)
 end
+--[=[
+  @within maid
 
+  Clears all objects in the maid without destroying it
+]=]
 function maid:clear()
 	assert(not self.cleaning, "cannot call maid:clear while cleaning")
 	self.cleaning = true
@@ -170,7 +284,11 @@ function maid:clear()
 
 	self.cleaning = false
 end
+--[=[
+  @within maid
 
+  Clears all objects in the maid & destroys the maid, leaving it unusable
+]=]
 function maid:clean()
 	assert(not self.cleaning, "cannot call maid:clean while cleaning")
 	self.cleaning = true
