@@ -33,18 +33,14 @@ type maid_impl = {
 	spawn: (self: maid, fn: (...any) -> object_enum, ...any) -> object_enum,
 	add: (self: maid, object: object_enum, method: string?) -> object_enum,
 	extend: (self: maid) -> maid,
-	remove: (self: maid, object: object_enum) -> (),
-	remove_no_clean: (self: maid, object: object_enum) -> (),
+	remove: (self: maid, object: object_enum, ignore_clean: boolean?, _internal: boolean?) -> (),
 	bind_to_instance: (self: maid, instance: Instance) -> RBXScriptConnection,
 	connect: (self: maid, signal: RBXScriptSignal, callback: (...any) -> ()) -> RBXScriptConnection,
 	clear: (self: maid) -> (),
 	clean: (self: maid) -> (),
 }
 type object_enum = Instance | () -> () | { [string]: (object_enum) -> () } | thread | promise | RBXScriptConnection
-export type maid = typeof(setmetatable(
-	{} :: { objects: { object_enum }, object_cleanups: { [Instance]: string }, cleaning: boolean },
-	{} :: maid_impl
-))
+export type maid = typeof(setmetatable({} :: { objects: { [object_enum]: string }, cleaning: boolean }, {} :: maid_impl))
 
 local function is_promise(object: object_enum): boolean -- taken from sleitnick/trove
 	local n_promise: promise = object :: promise
@@ -94,7 +90,6 @@ maid.__index = maid
 function maid.new(): maid
 	local new_maid = {
 		objects = {},
-		object_cleanups = {},
 		cleaning = false,
 	}
 
@@ -102,6 +97,7 @@ function maid.new(): maid
 end
 
 --[=[
+  @method add
   @within maid
   @param object -- The object to add to the maid
   @return object -- The passed object	
@@ -116,20 +112,24 @@ end
 ]=]
 
 function maid:add(object: object_enum, custom_method: string?): object_enum
-	assert(not self.cleaning, "cannot call maid:add while cleaning")
+	assert(not self.cleaning, debug.traceback("attempted to call maid:add while cleaning! traceback: "))
 	local method: string, is_promise: boolean = get_cleanup_method(object, custom_method)
 
-	table.insert(self.objects, object)
-	self.object_cleanups[object] = method
+	self.objects[object] = method
 
-	if is_promise then
-		(object :: promise):finallyCall(self.remove_no_clean, self, object) -- remove promises from maid when they are cleaned so they dont take up space
+	if is_promise and (object :: promise):getStatus() == "Started" then
+		(object :: promise):finally(function(status): ...any
+			if not self.cleaning then
+				self:remove(object, true)
+			end
+		end)
 	end
 
 	return object
 end
 
 --[=[
+  @method spawn
   @within maid
   @param Fn (...any)->Object -- The function for the maid to pass arguments in
   @param ... ...any -- The arguments for the maid to pass to the function
@@ -154,8 +154,9 @@ function maid:spawn(fn: (...any) -> object_enum, ...): object_enum
 end
 
 --[=[
+  @method extend
   @within maid
-  @return Maid -- The constructed maid
+  @return maid -- The constructed maid
 
   Makes a new maid and adds it to the maid that the function was called from
   Example usage:
@@ -173,52 +174,36 @@ end
 
 function maid:extend(): maid
 	assert(not self.cleaning, "cannot call maid:extend while cleaning")
-	local new_maid = maid.new()
-	self:add(new_maid, "clean")
+	local new_maid = self:add(maid.new(), "clean")
+
 	return new_maid
 end
 
 --[=[
+  @method remove
   @within maid
+  @param object -- The object to remove
+  @param ignore_clean -- Optional, if the maid should skip the cleanup process and just remove the object from storage
 
   Removes an object from the maid & cleans it
 ]=]
 
-function maid:remove(object: object_enum)
-	assert(not self.cleaning, "cannot call maid:remove while cleaning")
-	local in_table = table.find(self.objects, object)
+function maid:remove(object: object_enum, ignore_clean: boolean?, _internal: boolean?)
+	assert(not (self.cleaning and not _internal), "cannot call maid:remove while cleaning")
 
-	if not in_table then
-		return
+	local method = self.objects[object]
+
+	if method then
+		if not ignore_clean then
+			_clean(object, method)
+		end
+
+		self.objects[object] = nil
 	end
-
-	local user_method = self.object_cleanups[object] :: string
-	local method = get_cleanup_method(object, user_method)
-
-	_clean(object, method)
-	table.remove(self.objects, in_table)
-	self.object_cleanups[object] = nil
 end
 
 --[=[
-  @within maid
-
-  Removes an object from the maid, but does not clean it
-]=]
-
-function maid:remove_no_clean(object: object_enum)
-	assert(not self.cleaning, "cannot call maid:remove_no_clean while cleaning")
-	local in_table = table.find(self.objects, object)
-
-	if not in_table then
-		return
-	end
-
-	table.remove(self.objects, in_table)
-	self.object_cleanups[object] = nil
-end
-
---[=[
+  @method connect
   @within maid
   @param Signal RBXScriptSignal -- The signal to connect to
   @param Callback (...any)->() -- The callback to hook to the signal
@@ -243,6 +228,7 @@ function maid:connect(signal: RBXScriptSignal, callback: (...any) -> ()): RBXScr
 end
 
 --[=[
+  @method bind_to_instance
   @within maid
   @param Instance -- The instance to bind to
 ` @returns Connection -- The connection listening to `instance.Destroying`
@@ -265,6 +251,7 @@ function maid:bind_to_instance(instance: Instance): RBXScriptConnection
 	end)
 end
 --[=[
+  @method clear
   @within maid
 
   Clears all objects in the maid without destroying it
@@ -273,18 +260,14 @@ function maid:clear()
 	assert(not self.cleaning, "cannot call maid:clear while cleaning")
 	self.cleaning = true
 
-	for i: number, object: object_enum in self.objects do
-		local user_method = self.object_cleanups[object] :: string
-		local method = get_cleanup_method(object, user_method)
-
-		_clean(object, method)
-		table.remove(self.objects, i)
-		self.object_cleanups[object] = nil
+	for object: object_enum, method: string in self.objects do
+		self:remove(object, false, true)
 	end
 
 	self.cleaning = false
 end
 --[=[
+  @method clean
   @within maid
 
   Clears all objects in the maid & destroys the maid, leaving it unusable
@@ -293,13 +276,8 @@ function maid:clean()
 	assert(not self.cleaning, "cannot call maid:clean while cleaning")
 	self.cleaning = true
 
-	for i: number, object: object_enum in self.objects do
-		local user_method = self.object_cleanups[object] :: string
-		local method = get_cleanup_method(object, user_method)
-
-		_clean(object, method)
-		table.remove(self.objects, i)
-		self.object_cleanups[object] = nil
+	for object: object_enum, method: string in self.objects do
+		self:remove(object, false, true)
 	end
 
 	setmetatable(self, nil)
